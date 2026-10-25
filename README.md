@@ -77,10 +77,10 @@ Le dépôt fonctionne seul : chaque push sur la branche par défaut et chaque pa
 | `lint.yml` | Vérifie les scripts shell (ShellCheck) |
 | `dependabot.yml` | Mises à jour des actions |
 
-### Une fois, après le premier build
+### À savoir
 
-1. **Paquet public** : *Profil → Packages → bazzite-deck-bc250 → Package settings → Change visibility → Public*. Sans ça, la BC-250 ne peut pas télécharger l'image (le script te le dit avec le lien direct).
-2. **Branche par défaut** : *Settings → General → Default branch*. Les builds planifiés tournent sur la branche par défaut : c'est elle qui publie.
+- **Paquet public** : le paquet hérite de la visibilité du dépôt public. S'il devenait privé, la BC-250 ne pourrait plus télécharger l'image (le script le signale avec le lien direct) : *Profil → Packages → bazzite-deck-bc250 → Package settings → Change visibility → Public*.
+- **Branche par défaut** : c'est elle qui publie (les builds planifiés tournent dessus). Tu peux la renommer en `main` sans rien casser (*Code → Branches → ✏️*).
 
 ### Signature (recommandé)
 
