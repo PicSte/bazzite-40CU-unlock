@@ -2,10 +2,14 @@ name: Build bazzite-deck-bc250
 
 on:
   push:
-    branches: [main]
-    paths-ignore: ['**.md']
+    paths:
+      - Containerfile
+      - build_files/**
+      - patches/**
+      - keys/**
+      - .github/workflows/build.yml
   schedule:
-    - cron: '41 5 * * *'   # tous les jours, 05:41 UTC
+    - cron: '23 */6 * * *'   # toutes les 6 h : suit bazzite-deck:stable
   workflow_dispatch:
     inputs:
       force:
@@ -16,24 +20,27 @@ on:
 env:
   BASE_IMAGE: ghcr.io/ublue-os/bazzite-deck:stable
   IMAGE_NAME: bazzite-deck-bc250
+  # Seule la branche par défaut publie ; les autres branches construisent pour tester
+  PUBLISH: ${{ github.event_name == 'schedule' || github.ref_name == github.event.repository.default_branch }}
 
 permissions:
   contents: read
-  packages: write
 
 concurrency:
-  group: ${{ github.workflow }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
+    permissions:
+      contents: read
+      packages: write
+    env:
+      HAS_SIGNING_KEY: ${{ secrets.SIGNING_SECRET != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Libérer de l'espace disque
-        uses: ublue-os/remove-unwanted-software@695eb75bc387dbcd9685a8e72d23439d8686cba6
 
       - name: Connexion à ghcr.io
         uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
@@ -42,13 +49,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: env.HAS_SIGNING_KEY == 'true'
+        with:
+          cosign-release: 'v3.1.2'
+
       - name: Image de base et décision de build
         id: meta
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+          COSIGN_PASSWORD: ""
+          FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
           IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}"
 
-          base_json="$(skopeo inspect "docker://${BASE_IMAGE}")"
+          base_json="$(skopeo inspect --retry-times 3 "docker://${BASE_IMAGE}")"
           BASE_DIGEST="$(jq -r '.Digest' <<<"$base_json")"
           KVER="$(jq -r '.Labels["ostree.linux"] // empty' <<<"$base_json")"
           VERSION="$(jq -r '.Labels["org.opencontainers.image.version"] // empty' <<<"$base_json")"
@@ -56,14 +72,25 @@ jobs:
           FEDORA="$(sed -nE 's/.*\.fc([0-9]+)\..*/\1/p' <<<"$KVER")"
           [ -n "$FEDORA" ] || { echo "version Fedora introuvable dans $KVER"; exit 1; }
 
-          # Empreinte des fichiers qui influencent l'image
-          SRC_HASH="$(git ls-files -s Containerfile build_files patches cosign.pub | sha256sum | cut -c1-16)"
+          # Clé publique dérivée du secret : c'est elle que l'image fera confiance
+          rm -f keys/cosign.pub
+          SIGNED=false
+          if [ -n "$COSIGN_PRIVATE_KEY" ]; then
+            cosign public-key --key env://COSIGN_PRIVATE_KEY > keys/cosign.pub
+            SIGNED=true
+          elif [ "$PUBLISH" = true ]; then
+            echo "::warning title=Image non signée::Secret SIGNING_SECRET absent : l'image est publiée sans signature (voir README, « Signature »)."
+          fi
 
-          prev="$(skopeo inspect "docker://${IMAGE}:latest" 2>/dev/null \
+          # Empreinte de tout ce qui influence l'image
+          SRC_HASH="$( { git ls-files -s Containerfile build_files patches; cat keys/cosign.pub 2>/dev/null || true; } \
+                       | sha256sum | cut -c1-16)"
+
+          prev="$(skopeo inspect --retry-times 3 "docker://${IMAGE}:latest" 2>/dev/null \
                   | jq -r '(.Labels["bc250.base-digest"] // "") + " " + (.Labels["bc250.src-hash"] // "")' || true)"
-          SKIP=false
-          if [ "${{ inputs.force }}" != "true" ] && [ "$prev" = "$BASE_DIGEST $SRC_HASH" ]; then
-            SKIP=true
+          BUILD=true
+          if [ "$FORCE" != "true" ] && [ "$prev" = "$BASE_DIGEST $SRC_HASH" ]; then
+            BUILD=false
           fi
 
           {
@@ -73,12 +100,20 @@ jobs:
             echo "version=$VERSION"
             echo "fedora=$FEDORA"
             echo "src_hash=$SRC_HASH"
-            echo "skip=$SKIP"
+            echo "signed=$SIGNED"
+            echo "build=$BUILD"
           } >> "$GITHUB_OUTPUT"
-          echo "Base : $VERSION — noyau $KVER — Fedora $FEDORA — skip=$SKIP"
+          echo "Base : $VERSION — noyau $KVER — Fedora $FEDORA — signée=$SIGNED — build=$BUILD — publication=$PUBLISH"
+          if [ "$BUILD" = false ]; then
+            echo "Image à jour : $IMAGE:latest est déjà construite sur Bazzite $VERSION." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Libérer de l'espace disque
+        if: steps.meta.outputs.build == 'true'
+        uses: ublue-os/remove-unwanted-software@695eb75bc387dbcd9685a8e72d23439d8686cba6
 
       - name: Build
-        if: steps.meta.outputs.skip != 'true'
+        if: steps.meta.outputs.build == 'true'
         run: |
           set -euo pipefail
           IMAGE="${{ steps.meta.outputs.image }}"
@@ -95,11 +130,12 @@ jobs:
             --label ostree.linux="${{ steps.meta.outputs.kver }}" \
             --label bc250.base-digest="${{ steps.meta.outputs.base_digest }}" \
             --label bc250.src-hash="${{ steps.meta.outputs.src_hash }}" \
+            --label bc250.signed="${{ steps.meta.outputs.signed }}" \
             -t "$IMAGE:latest" \
             -f Containerfile .
 
       - name: Push
-        if: steps.meta.outputs.skip != 'true'
+        if: steps.meta.outputs.build == 'true' && env.PUBLISH == 'true'
         id: push
         run: |
           set -euo pipefail
@@ -111,21 +147,78 @@ jobs:
           done
           echo "digest=$(cat /tmp/digest)" >> "$GITHUB_OUTPUT"
 
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-        if: steps.meta.outputs.skip != 'true'
-        with:
-          cosign-release: 'v3.1.2'
-
       - name: Signature
-        if: steps.meta.outputs.skip != 'true'
+        if: steps.push.outcome == 'success' && steps.meta.outputs.signed == 'true'
         env:
           COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
           COSIGN_PASSWORD: ""
         run: |
           set -euo pipefail
-          [ -n "$COSIGN_PRIVATE_KEY" ] || { echo "secret SIGNING_SECRET manquant"; exit 1; }
+          ref="${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}"
           # Ancien format de bundle : le seul que rpm-ostree sait vérifier
           # (coreos/rpm-ostree#5509, comme ublue-os/image-template)
           cosign sign --yes --new-bundle-format=false --use-signing-config=false \
-            --key env://COSIGN_PRIVATE_KEY \
-            "${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}"
+            --key env://COSIGN_PRIVATE_KEY "$ref"
+          cosign verify --key keys/cosign.pub "$ref" > /dev/null
+
+      - name: Résumé
+        if: steps.push.outcome == 'success'
+        run: |
+          {
+            echo "### ${{ steps.meta.outputs.image }}:latest publiée"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Bazzite | ${{ steps.meta.outputs.version }} |"
+            echo "| Noyau | ${{ steps.meta.outputs.kver }} |"
+            echo "| Digest | \`${{ steps.push.outputs.digest }}\` |"
+            echo "| Signée | ${{ steps.meta.outputs.signed }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # Ouvre une issue quand le build automatique casse (patch qui ne s'applique
+  # plus, tag OGC introuvable…) et la ferme quand il repart.
+  suivi:
+    needs: build
+    if: always() && (github.event_name == 'schedule' || github.ref_name == github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+      actions: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RESULT: ${{ needs.build.result }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Issue d'échec
+        run: |
+          set -euo pipefail
+          label=build-failure
+          open="$(gh issue list --label "$label" --state open --json number --jq '.[0].number // empty' 2>/dev/null || true)"
+          case "$RESULT" in
+            failure)
+              if [ -z "$open" ]; then
+                gh label create "$label" --color B60205 --description "Échec du build automatique" --force
+                gh issue create --label "$label" \
+                  --title "Le build automatique de l'image échoue" \
+                  --body "Le dernier build a échoué : $RUN_URL
+
+          Aucune nouvelle image n'est publiée : la BC-250 reste sur la dernière version qui fonctionne.
+          Causes habituelles : nouveau noyau Bazzite sur lequel le patch ne s'applique plus, ou tag OpenGamingCollective introuvable (voir README, « Dépannage »).
+
+          Cette issue se fermera toute seule au prochain build réussi."
+              fi
+              ;;
+            success)
+              if [ -n "$open" ]; then
+                gh issue close "$open" --comment "Build réparé : $RUN_URL"
+              fi
+              ;;
+          esac
+
+      # GitHub désactive les workflows planifiés d'un dépôt public après 60 jours
+      # sans activité : on le réactive à chaque passage.
+      - name: Garder la planification active
+        if: github.event_name == 'schedule'
+        run: gh api -X PUT "repos/$GH_REPO/actions/workflows/build.yml/enable"

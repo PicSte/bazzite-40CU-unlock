@@ -1,106 +1,130 @@
-# bazzite-deck-bc250
+# bazzite-40CU-unlock
 
 Image **Bazzite Deck officielle** (`ghcr.io/ublue-os/bazzite-deck:stable`) avec une seule modification : le module `amdgpu` est recompilé avec le patch de déverrouillage **40 CU** de l'AMD BC-250 ([duggasco/bc250-40cu-unlock](https://github.com/duggasco/bc250-40cu-unlock)).
 
-- Même noyau OGC que Bazzite, même Fedora, mêmes mises à jour : la CI suit `bazzite-deck:stable` chaque jour.
+Image publiée : **`ghcr.io/picste/bazzite-deck-bc250`**
+
+- Même noyau OGC que Bazzite, même Fedora, mêmes mises à jour : GitHub Actions vérifie `bazzite-deck:stable` toutes les 6 heures et reconstruit l'image dès qu'elle change.
 - Seul `amdgpu.ko` est reconstruit, à partir du tag OpenGamingCollective/linux qui correspond exactement au noyau de l'image (`7.2.9-ogc3.1.fc44` → `v7.2.9-ogc3`), contre le `kernel-devel` de l'image elle-même.
-- Le patch ne fait rien tant que le paramètre `amdgpu.bc250_cc_write_mode` vaut 0 (défaut). Il ne s'active que sur l'ID PCI `0x13FE`.
-- Si une nouvelle version de Bazzite casse le patch ou la compilation, la CI échoue et **aucune image n'est publiée** : la machine reste sur la dernière version qui fonctionne.
+- Le patch ne fait rien tant que `amdgpu.bc250_cc_write_mode` vaut 0 (défaut), et ne s'active que sur l'ID PCI `0x13FE`.
+- Si une nouvelle version de Bazzite casse le patch ou la compilation, **aucune image n'est publiée** : la BC-250 reste sur la dernière version qui fonctionne, et une issue s'ouvre dans ce dépôt.
+
+## Installation sur la BC-250
+
+En mode Bureau, ouvre **Konsole** et lance :
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/PicSte/bazzite-40CU-unlock/HEAD/bc250-setup.sh -o /tmp/bc250-setup.sh
+sudo bash /tmp/bc250-setup.sh
+```
+
+C'est tout. Le script :
+
+1. vérifie que tu es sur Bazzite, que la BC-250 est détectée et que l'image est publiée ;
+2. bascule le système sur `ghcr.io/picste/bazzite-deck-bc250:latest` (`rpm-ostree rebase`, seules les couches modifiées sont téléchargées) ;
+3. ajoute l'argument noyau `amdgpu.bc250_cc_write_mode=3` (déverrouillage 40 CU) ;
+4. s'installe dans `/usr/local/bin/bc250-setup` avec un petit service de finalisation ;
+5. propose de redémarrer (Entrée = oui).
+
+Au redémarrage, la BC-250 tourne en 40 CU. Deux minutes après, le service de finalisation vérifie le module et active tout seul la **vérification de signature** de l'image (`ostree-image-signed`), puis se désactive. Sans clé de signature (voir plus bas), il réessaie à chaque démarrage, sans rien bloquer.
+
+Pour une installation sans aucune question : `sudo bash /tmp/bc250-setup.sh --yes`.
+
+### Vérifier
+
+```bash
+sudo bc250-setup status
+```
+
+Affiche l'image démarrée, l'état de la signature, si le module patché est chargé, le nombre de CU actifs (40 attendu) et la température du GPU.
+
+Pour aller plus loin : `RADV_DEBUG=info vulkaninfo --summary 2>&1 | grep num_cu` (40 attendu).
+
+### Autres commandes
+
+| Commande | Effet |
+|---|---|
+| `sudo bc250-setup status` | État complet |
+| `sudo bc250-setup disable-40cu` | Retire l'argument noyau (retour à 24 CU, image conservée) |
+| `sudo bc250-setup enable-40cu` | Le remet |
+| `sudo bc250-setup uninstall` | Revient à l'image Bazzite d'origine et supprime le script |
+| `bc250-setup signing-key` | Crée la clé de signature pour GitHub (voir plus bas) |
+| `bc250-setup --help` | Toutes les options (`--no-40cu`, `--no-reboot`, `--image`, `--tag`) |
+
+Tes réglages locaux suivent la bascule : autres arguments noyau, paquets superposés, initramfs régénéré localement.
+
+### À savoir
+
+- Toutes les cartes ne tiennent pas les 40 CU. En cas d'artefacts ou de plantages GPU, certains CU sont peut-être défectueux : `sudo rpm-ostree kargs --append=amdgpu.disable_cu=<se>.<sh>.<cu>,…` permet de les masquer.
+- Les 16 CU supplémentaires chauffent : à 2 GHz, ~181 W et 96 °C d'après l'auteur du patch. Il conseille de plafonner le GPU à 1500 MHz / 900 mV avec `cyan-skillfish-governor` (83 °C, toujours ~1,6× plus rapide qu'en 24 CU).
+- Si tu utilises `cyan-skillfish-governor-smu`, l'auteur de l'image d'origine recommande de le désactiver : `sudo systemctl disable --now cyan-skillfish-governor-smu.service`.
+
+## Mises à jour
+
+Rien à faire : la CI reconstruit l'image quand `bazzite-deck:stable` change, et la BC-250 se met à jour comme d'habitude (mise à jour automatique de Bazzite, `ujust update` ou `rpm-ostree upgrade`).
+
+- Les nouvelles versions arrivent au plus 6 h après Bazzite, plus ~1 h de build.
+- **N'utilise pas `bazzite-rollback-helper rebase …`** : il te ramènerait sur l'image officielle, sans le patch.
+- Dependabot propose chaque semaine une PR pour mettre à jour les actions GitHub ; la fusionner suffit.
+
+## Côté GitHub
+
+Le dépôt fonctionne seul : chaque push sur la branche par défaut et chaque passage planifié construit et publie l'image si nécessaire. Les autres branches construisent sans publier (pour tester un changement).
+
+| Workflow | Rôle |
+|---|---|
+| `build.yml` | Toutes les 6 h : compare l'image de base et les sources, reconstruit, publie sur ghcr.io, signe. Ouvre une issue `build-failure` en cas d'échec et la ferme au build suivant réussi. Garde la planification active (GitHub la coupe après 60 jours sans activité). |
+| `lint.yml` | Vérifie les scripts shell (ShellCheck) |
+| `dependabot.yml` | Mises à jour des actions |
+
+### Une fois, après le premier build
+
+1. **Paquet public** : *Profil → Packages → bazzite-deck-bc250 → Package settings → Change visibility → Public*. Sans ça, la BC-250 ne peut pas télécharger l'image (le script te le dit avec le lien direct).
+2. **Branche par défaut** : *Settings → General → Default branch*. Les builds planifiés tournent sur la branche par défaut : c'est elle qui publie.
+
+### Signature (recommandé)
+
+Sans signature, l'image est publiée quand même et la BC-250 l'utilise en mode « non vérifié ». Pour activer la vérification, il suffit d'ajouter un secret, une seule fois. Sur la BC-250 (cosign est fourni par Bazzite), **sans sudo** :
+
+```bash
+bc250-setup signing-key
+```
+
+La commande crée la clé dans `~/.config/bc250-signing/`, puis :
+
+- si `gh` est installé et connecté (`brew install gh && gh auth login`), elle enregistre le secret `SIGNING_SECRET` et relance le build toute seule ;
+- sinon, elle affiche la clé et le lien où la coller (*Settings → Secrets and variables → Actions → New repository secret*, nom `SIGNING_SECRET`), puis il reste à relancer le build (*Actions → Build bazzite-deck-bc250 → Run workflow*).
+
+La clé publique est dérivée du secret par la CI et intégrée à l'image : rien d'autre à commiter. Au démarrage qui suit le build signé, la BC-250 passe toute seule en `ostree-image-signed`.
+
+> **Ne change pas de clé ensuite** : la BC-250 vérifie chaque mise à jour avec la clé de l'image installée. Après un changement de clé, il faut relancer `sudo bc250-setup install` (qui repasse brièvement en mode non vérifié).
+
+## Retour arrière
+
+| Situation | Commande |
+|---|---|
+| Désactiver le 40 CU | `sudo bc250-setup disable-40cu` |
+| La machine ne démarre plus en 40 CU | Au menu GRUB, `e` sur l'entrée, ajouter `amdgpu.bc250_cc_write_mode=0` à la ligne `linux`, puis Ctrl-X ; ensuite `sudo bc250-setup disable-40cu` |
+| Revenir au déploiement précédent | `sudo rpm-ostree rollback` |
+| Revenir à Bazzite officiel | `sudo bc250-setup uninstall` |
 
 ## Contenu
 
 | Fichier | Rôle |
 |---|---|
+| `bc250-setup.sh` | Script d'installation et de gestion sur la BC-250 |
 | `Containerfile` | Build en deux étapes : compilation d'amdgpu (Fedora), puis image finale |
 | `build_files/build-amdgpu.sh` | Récupère les sources OGC exactes, applique les patchs, compile, vérifie le vermagic |
 | `build_files/install-amdgpu.sh` | Remplace le module, `depmod`, régénère l'initramfs, configure la signature |
 | `patches/bc250-40cu-amdgpu.patch` | Patch 40 CU (rebasé sur 7.2, lignes ajoutées identiques à l'original) |
-| `.github/workflows/build.yml` | Build quotidien, push sur ghcr.io, signature cosign |
-
-## 1. Mise en place du dépôt GitHub
-
-1. Crée un dépôt **public** vide sur GitHub, par exemple `bazzite-deck-bc250`, puis pousse ce dossier (c'est déjà un dépôt git avec un premier commit sur `main`) :
-
-   ```bash
-   git remote add origin git@github.com:<utilisateur>/bazzite-deck-bc250.git
-   git push -u origin main
-   ```
-2. Génère une paire de clés de signature (sur la BC-250, Homebrew est fourni par Bazzite) :
-
-   ```bash
-   brew install cosign
-   cosign generate-key-pair      # laisser le mot de passe VIDE (deux fois Entrée)
-   ```
-
-3. Commite **`cosign.pub`** à la racine du dépôt. Ne commite jamais `cosign.key` (déjà dans `.gitignore`).
-4. Dans *Settings → Secrets and variables → Actions*, crée le secret **`SIGNING_SECRET`** avec le contenu complet de `cosign.key`.
-5. Dans *Actions*, lance **Build bazzite-deck-bc250 → Run workflow**. Compte 30 à 60 minutes.
-6. Après le premier build réussi, rends le paquet public : *ton profil → Packages → bazzite-deck-bc250 → Package settings → Change visibility → Public*. Sinon `rpm-ostree` ne pourra pas le télécharger.
-
-## 2. Installation sur la BC-250
-
-Remplace `<utilisateur>` par ton nom GitHub **en minuscules**.
-
-```bash
-# 1er passage : l'image n'est pas encore connue du système, donc non vérifiée
-sudo rpm-ostree rebase ostree-unverified-registry:ghcr.io/<utilisateur>/bazzite-deck-bc250:latest
-systemctl reboot
-
-# 2e passage : bascule en vérification de signature (la clé est maintenant dans l'image)
-sudo rpm-ostree rebase ostree-image-signed:docker://ghcr.io/<utilisateur>/bazzite-deck-bc250:latest
-systemctl reboot
-```
-
-Vérifie que le module patché est bien chargé :
-
-```bash
-rpm-ostree status | head -5
-modinfo -F parm amdgpu | grep bc250
-```
-
-Tes réglages locaux suivent le rebase : arguments noyau (`rpm-ostree kargs`), régénération locale de l'initramfs (override ACPI via dracut), paquets superposés.
-
-## 3. Activation des 40 CU (une seule fois)
-
-```bash
-sudo rpm-ostree kargs --append-if-missing=amdgpu.bc250_cc_write_mode=3
-systemctl reboot
-```
-
-Après redémarrage :
-
-```bash
-sudo dmesg | grep bc250-40cu
-vulkaninfo 2>/dev/null | grep -i activeComputeUnitCount   # 40 attendu
-```
-
-C'est **permanent** : l'argument noyau reste d'une mise à jour à l'autre et le pilote applique le déverrouillage à chaque démarrage, sans script ni service.
-
-À savoir :
-
-- Si tu utilises `cyan-skillfish-governor-smu`, l'auteur de l'image d'origine recommande de le désactiver : `sudo systemctl disable --now cyan-skillfish-governor-smu.service`.
-- Toutes les cartes ne tiennent pas les 40 CU. En cas d'artefacts ou de plantages GPU, certains CU sont peut-être défectueux : `amdgpu.disable_cu=<se>.<sh>.<cu>,…` permet de les masquer.
-- Les 16 CU supplémentaires chauffent : surveille les températures et le refroidissement de la mémoire.
-
-## 4. Mises à jour
-
-Rien à faire : la CI reconstruit l'image quand `bazzite-deck:stable` change, et la machine se met à jour normalement (`ujust update`, mise à jour automatique ou `rpm-ostree upgrade`).
-
-- Les nouvelles versions arrivent jusqu'à 24 h après Bazzite (horaire du cron).
-- **N'utilise pas `bazzite-rollback-helper rebase stable`** : il te ramènerait sur l'image officielle, sans le patch.
-- Si la CI échoue (patch qui ne s'applique plus, tag OGC introuvable…), GitHub t'envoie un e-mail et ta machine reste sur la dernière image valide.
-
-## 5. Retour arrière
-
-| Situation | Commande |
-|---|---|
-| Désactiver le 40 CU | `sudo rpm-ostree kargs --delete=amdgpu.bc250_cc_write_mode=3` |
-| La machine ne démarre plus en 40 CU | Au menu GRUB, `e` sur l'entrée, ajouter `amdgpu.bc250_cc_write_mode=0` à la ligne `linux`, puis Ctrl-X |
-| Revenir au déploiement précédent | `sudo rpm-ostree rollback` |
-| Revenir à Bazzite officiel | `sudo rpm-ostree rebase ostree-image-signed:docker://ghcr.io/ublue-os/bazzite-deck:stable` |
+| `keys/` | Reçoit `cosign.pub`, écrit par la CI à partir du secret |
 
 ## Dépannage
 
-- **`rpm-ostree` refuse l'image signée** : `/etc/containers/policy.json` a peut-être été modifié localement, et OSTree garde alors ta version au lieu de celle de l'image. Compare avec `diff /usr/etc/containers/policy.json /etc/containers/policy.json`.
-- **Build qui échoue sur le tag** : le format de version du noyau OGC a changé. Lance le workflow à la main et adapte la regex dans `build-amdgpu.sh`, ou fixe `OGC_TAG`.
-- **Build qui échoue sur le patch** : le code de `gfx_v10_0_get_cu_info()` a bougé en amont ; il faut rebaser `patches/bc250-40cu-amdgpu.patch`.
+- **Le script dit que l'image est privée** : rends le paquet public (voir « Côté GitHub »).
+- **Le script dit que l'image n'est pas publiée** : le premier build prend 30 à 60 minutes ; suis-le dans l'onglet *Actions*.
+- **Finalisation bloquée** : `journalctl -u bc250-setup` montre ce que fait le service à chaque démarrage.
+- **`rpm-ostree` refuse l'image signée** : `/etc/containers/policy.json` a peut-être été modifié localement (OSTree garde alors ta version). Le service y reporte normalement l'entrée de l'image ; compare avec `diff /usr/etc/containers/policy.json /etc/containers/policy.json`.
+- **Issue « Le build automatique de l'image échoue »** : ouvre le lien du run.
+  - *tag introuvable* : le format de version du noyau OGC a changé ; adapte la regex dans `build-amdgpu.sh`, ou fixe `OGC_TAG`.
+  - *le patch ne s'applique plus* : `gfx_v10_0_get_cu_info()` a bougé en amont ; il faut rebaser `patches/bc250-40cu-amdgpu.patch`.

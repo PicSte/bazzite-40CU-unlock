@@ -1,3 +1,5 @@
 cosign.key
 cosign.private
 *.key
+# écrit par la CI à partir du secret SIGNING_SECRET
+keys/cosign.pub

@@ -58,15 +58,22 @@ grep -q 'bc250_cc_write_mode' "$WORK_DIR/src/drivers/gpu/drm/amd/amdgpu/gfx_v10_
     || die "patch 40 CU absent de gfx_v10_0.c après application"
 
 # --- 4. Compilation externe contre kernel-devel -------------------------------
-# On sort l'arborescence amd/ de l'arbre : amdgpu ne référence que ../ (FULL_AMD_PATH)
-mv "$WORK_DIR/src/drivers/gpu/drm/amd" "$WORK_DIR/amd"
+# amdgpu_trace.h se référence par un chemin relatif à $srctree/include/trace
+# (TRACE_INCLUDE_PATH = ../../drivers/gpu/drm/amd/amdgpu) : on compile dans une
+# copie de kernel-devel où amd/ est à sa place, sans toucher à $KDIR.
+BUILD_KDIR="$WORK_DIR/kernel"
+mkdir -p "$BUILD_KDIR"
+cp -a "$KDIR/." "$BUILD_KDIR/"
+rm -rf "$BUILD_KDIR/drivers/gpu/drm/amd"
+mv "$WORK_DIR/src/drivers/gpu/drm/amd" "$BUILD_KDIR/drivers/gpu/drm/amd"
 rm -rf "$WORK_DIR/src"
+mod_dir="$BUILD_KDIR/drivers/gpu/drm/amd/amdgpu"
 
 # -g0 : pas d'infos de debug (gain de temps et de disque, sans effet sur l'ABI)
-make -C "$KDIR" M="$WORK_DIR/amd/amdgpu" KCFLAGS="-g0" \
+make -C "$BUILD_KDIR" M="$mod_dir" KCFLAGS="-g0" \
     ${MODPOST_WARN:+KBUILD_MODPOST_WARN=1} -j"$(nproc)" modules
 
-ko="$WORK_DIR/amd/amdgpu/amdgpu.ko"
+ko="$mod_dir/amdgpu.ko"
 [[ -f "$ko" ]] || die "amdgpu.ko n'a pas été produit"
 strip --strip-debug "$ko"
 

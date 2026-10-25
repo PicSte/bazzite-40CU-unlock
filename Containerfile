@@ -26,10 +26,11 @@ FROM base
 
 ARG IMAGE_REF
 COPY --from=builder /out/ /tmp/bc250/
-COPY cosign.pub /tmp/bc250/cosign.pub
+# keys/cosign.pub est écrit par la CI à partir du secret SIGNING_SECRET (facultatif)
+COPY keys/ /tmp/bc250/keys/
 COPY build_files/install-amdgpu.sh /tmp/install-amdgpu.sh
 
 RUN IMAGE_REF="${IMAGE_REF}" bash /tmp/install-amdgpu.sh \
     && rm -rf /tmp/bc250 /tmp/install-amdgpu.sh
 
-RUN --mount=type=tmpfs,target=/run --network=none bootc container lint
+RUN bootc container lint

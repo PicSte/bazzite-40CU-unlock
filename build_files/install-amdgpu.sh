@@ -1,9 +1,10 @@
 #!/usr/bin/bash
 # Étape finale (dans l'image Bazzite) : remplace amdgpu.ko par la version
-# patchée, régénère depmod + initramfs et configure la vérification de
-# signature de l'image.
+# patchée, régénère depmod + initramfs et, si une clé publique est fournie,
+# configure la vérification de signature de l'image.
 #
-# Entrée : /tmp/bc250/{amdgpu.ko,kver,ogc_tag,cosign.pub}
+# Entrée : /tmp/bc250/{amdgpu.ko,kver,ogc_tag}
+#          /tmp/bc250/keys/cosign.pub              (facultatif)
 #          IMAGE_REF=ghcr.io/<utilisateur>/<image>   (sans tag)
 set -euo pipefail
 shopt -s nullglob
@@ -50,8 +51,12 @@ chmod 0600 "$MODDIR/initramfs.img"
 
 # --- 3. Politique de signature de l'image -------------------------------------
 [[ -n "${IMAGE_REF:-}" ]] || die "IMAGE_REF non défini"
+if [[ ! -s "$SRC/keys/cosign.pub" ]]; then
+    echo "Pas de clé publique fournie : image non signée, politique de signature inchangée"
+    exit 0
+fi
 name="${IMAGE_REF##*/}"
-install -Dm644 "$SRC/cosign.pub" "/etc/pki/containers/$name.pub"
+install -Dm644 "$SRC/keys/cosign.pub" "/etc/pki/containers/$name.pub"
 
 cat > "/etc/containers/registries.d/$name.yaml" <<EOF
 docker:
