@@ -80,7 +80,10 @@ strip --strip-debug "$ko"
 # --- 5. Vérifications ---------------------------------------------------------
 vermagic="$(modinfo -F vermagic "$ko")"
 [[ "$vermagic" == "$KVER "* ]] || die "vermagic « $vermagic » ne correspond pas à $KVER"
-modinfo -F parm "$ko" | grep -q '^bc250_cc_write_mode:' \
+# Pas de « modinfo | grep -q » : avec pipefail, grep qui sort au premier
+# résultat fait parfois échouer modinfo (SIGPIPE)
+parms="$(modinfo -F parm "$ko")"
+grep -q '^bc250_cc_write_mode:' <<<"$parms" \
     || die "paramètre bc250_cc_write_mode absent du module"
 
 install -Dm644 "$ko" "$OUT_DIR/amdgpu.ko"

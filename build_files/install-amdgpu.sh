@@ -38,7 +38,9 @@ esac
 install -m644 "$new" "$orig"
 rm -rf "$tmp"
 
-modinfo -F parm "$orig" | grep -q '^bc250_cc_write_mode:' \
+# Sans pipe vers grep -q (SIGPIPE avec pipefail, voir build-amdgpu.sh)
+parms="$(modinfo -F parm "$orig")"
+grep -q '^bc250_cc_write_mode:' <<<"$parms" \
     || die "le module installé n'expose pas bc250_cc_write_mode"
 echo "amdgpu remplacé : $orig (sources OGC $(cat "$SRC/ogc_tag"))"
 
