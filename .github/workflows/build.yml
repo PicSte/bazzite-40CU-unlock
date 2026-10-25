@@ -1,0 +1,131 @@
+name: Build bazzite-deck-bc250
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md']
+  schedule:
+    - cron: '41 5 * * *'   # tous les jours, 05:41 UTC
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Reconstruire même si rien n'a changé"
+        type: boolean
+        default: false
+
+env:
+  BASE_IMAGE: ghcr.io/ublue-os/bazzite-deck:stable
+  IMAGE_NAME: bazzite-deck-bc250
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Libérer de l'espace disque
+        uses: ublue-os/remove-unwanted-software@695eb75bc387dbcd9685a8e72d23439d8686cba6
+
+      - name: Connexion à ghcr.io
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4.5.1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image de base et décision de build
+        id: meta
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}"
+
+          base_json="$(skopeo inspect "docker://${BASE_IMAGE}")"
+          BASE_DIGEST="$(jq -r '.Digest' <<<"$base_json")"
+          KVER="$(jq -r '.Labels["ostree.linux"] // empty' <<<"$base_json")"
+          VERSION="$(jq -r '.Labels["org.opencontainers.image.version"] // empty' <<<"$base_json")"
+          [ -n "$KVER" ] && [ -n "$VERSION" ] || { echo "labels de l'image de base manquants"; exit 1; }
+          FEDORA="$(sed -nE 's/.*\.fc([0-9]+)\..*/\1/p' <<<"$KVER")"
+          [ -n "$FEDORA" ] || { echo "version Fedora introuvable dans $KVER"; exit 1; }
+
+          # Empreinte des fichiers qui influencent l'image
+          SRC_HASH="$(git ls-files -s Containerfile build_files patches cosign.pub | sha256sum | cut -c1-16)"
+
+          prev="$(skopeo inspect "docker://${IMAGE}:latest" 2>/dev/null \
+                  | jq -r '(.Labels["bc250.base-digest"] // "") + " " + (.Labels["bc250.src-hash"] // "")' || true)"
+          SKIP=false
+          if [ "${{ inputs.force }}" != "true" ] && [ "$prev" = "$BASE_DIGEST $SRC_HASH" ]; then
+            SKIP=true
+          fi
+
+          {
+            echo "image=$IMAGE"
+            echo "base_digest=$BASE_DIGEST"
+            echo "kver=$KVER"
+            echo "version=$VERSION"
+            echo "fedora=$FEDORA"
+            echo "src_hash=$SRC_HASH"
+            echo "skip=$SKIP"
+          } >> "$GITHUB_OUTPUT"
+          echo "Base : $VERSION — noyau $KVER — Fedora $FEDORA — skip=$SKIP"
+
+      - name: Build
+        if: steps.meta.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.meta.outputs.image }}"
+          BASE_REPO="${BASE_IMAGE%:*}"
+          podman build \
+            --pull=newer \
+            --build-arg BASE_IMAGE="${BASE_REPO}@${{ steps.meta.outputs.base_digest }}" \
+            --build-arg FEDORA_VERSION="${{ steps.meta.outputs.fedora }}" \
+            --build-arg IMAGE_REF="$IMAGE" \
+            --label org.opencontainers.image.title="${IMAGE_NAME}" \
+            --label org.opencontainers.image.description="Bazzite Deck avec amdgpu patché (BC-250 40 CU)" \
+            --label org.opencontainers.image.source="${{ github.server_url }}/${{ github.repository }}" \
+            --label org.opencontainers.image.version="${{ steps.meta.outputs.version }}" \
+            --label ostree.linux="${{ steps.meta.outputs.kver }}" \
+            --label bc250.base-digest="${{ steps.meta.outputs.base_digest }}" \
+            --label bc250.src-hash="${{ steps.meta.outputs.src_hash }}" \
+            -t "$IMAGE:latest" \
+            -f Containerfile .
+
+      - name: Push
+        if: steps.meta.outputs.skip != 'true'
+        id: push
+        run: |
+          set -euo pipefail
+          IMAGE="${{ steps.meta.outputs.image }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+          podman push --digestfile /tmp/digest "$IMAGE:latest" "docker://$IMAGE:latest"
+          for tag in stable "$VERSION"; do
+            podman push "$IMAGE:latest" "docker://$IMAGE:$tag"
+          done
+          echo "digest=$(cat /tmp/digest)" >> "$GITHUB_OUTPUT"
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        if: steps.meta.outputs.skip != 'true'
+        with:
+          cosign-release: 'v3.1.2'
+
+      - name: Signature
+        if: steps.meta.outputs.skip != 'true'
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
+          COSIGN_PASSWORD: ""
+        run: |
+          set -euo pipefail
+          [ -n "$COSIGN_PRIVATE_KEY" ] || { echo "secret SIGNING_SECRET manquant"; exit 1; }
+          # Ancien format de bundle : le seul que rpm-ostree sait vérifier
+          # (coreos/rpm-ostree#5509, comme ublue-os/image-template)
+          cosign sign --yes --new-bundle-format=false --use-signing-config=false \
+            --key env://COSIGN_PRIVATE_KEY \
+            "${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}"
